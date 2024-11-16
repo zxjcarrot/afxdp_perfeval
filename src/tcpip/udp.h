@@ -75,7 +75,7 @@ always_inline void* memset32_htonl(void* dest, u32 val, u32 size)
     return dest;
 }
 
-always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pktsize)
+void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pktsize)
 {
     struct pktgen_hdr* pktgen_hdr;
     struct udphdr* udp_hdr;
@@ -101,8 +101,10 @@ always_inline void udp_create_frame(u8* pkt_data, u8* daddr, u8* saddr, u16 pkts
     ip_hdr->frag_off = 0;
     ip_hdr->ttl = IPDEFTTL;
     ip_hdr->protocol = IPPROTO_UDP;
-    ip_hdr->daddr = htonl(0x0a0a0a10);
-    ip_hdr->saddr = htonl(0xc0a80a01);
+    //ip_hdr->daddr = htonl(0x0a0a0a10);
+    //ip_hdr->saddr = htonl(0xc0a80a01);
+    ip_hdr->daddr = htonl(0x0a810013);
+    ip_hdr->saddr = htonl(0x0a810012);
 
     /* IP header checksum */
     ip_hdr->check = 0;

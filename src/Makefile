@@ -11,8 +11,8 @@ MAN_PAGE        :=
 ## add USER_DEFINES=-Dflag to make to build daq with some flag where flag can be:
 ##    UDP_MODE          L3/L4 checksumming
 ##
-USER_DEFINES    +=
-CFLAGS          += -I$(realpath .) $(USER_DEFINES)
+USER_DEFINES    += -DUDP_MODE
+CFLAGS          += -I$(realpath .) $(USER_DEFINES) -g
 BPF_CFLAGS      += -I$(realpath .)
 
 include $(LIB_DIR)/common.mk

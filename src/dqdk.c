@@ -48,6 +48,8 @@
 #define UMEM_FLAGS_USE_HGPG (1 << 0)
 #define UMEM_FLAGS_UNALIGNED (1 << 1)
 
+
+#define POLL_TIMEOUT 1000
 struct xsk_stat {
     u64 rcvd_frames;
     u64 rcvd_pkts;
@@ -61,6 +63,7 @@ struct xsk_stat {
     u64 invalid_udp_pkts;
     u64 runtime;
     u64 tx_wakeup_sendtos;
+    u64 tx_wakeup_sendtos_2;
     u64 sent_frames;
     struct xdp_statistics xstats;
 };
@@ -368,7 +371,22 @@ always_inline int awake_sendto(xsk_info* xsk)
     return -1;
 }
 
-always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq)
+void* drive_send_path(void* ptr) {
+    printf("drive_send_path created\n");
+    xsk_info* xsk = (xsk_info*) ptr;
+    struct pollfd fds[1];
+    
+    while (!break_flag) {
+        for (size_t i = 0; i < 1; i++) {
+            fds[i].fd = xsk_socket__fd(xsk->socket);
+            fds[i].events = POLLIN;
+        }
+        poll(fds, 1, POLL_TIMEOUT);
+        //..sendto(xsk_socket__fd(xsk->socket), NULL, 0, MSG_DONTWAIT, NULL, 0);
+    }
+    return NULL;
+}
+always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq, int from)
 {
     unsigned int rcvd, ret;
     u32 idx;
@@ -376,9 +394,14 @@ always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq)
     if (!xsk->outstanding_tx)
         return 0;
 
-    if (xsk->bind_flags & ~XDP_USE_NEED_WAKEUP || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
-        xsk->stats.tx_wakeup_sendtos++;
-        ret = awake_sendto(xsk);
+    if (xsk->bind_flags & XDP_USE_NEED_WAKEUP || xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+    //if ((xsk->bind_flags & XDP_USE_NEED_WAKEUP) && xsk_ring_prod__needs_wakeup(&xsk->tx)) {
+        if (from == 0)
+            xsk->stats.tx_wakeup_sendtos++;
+        else
+            xsk->stats.tx_wakeup_sendtos_2++;
+        //ret = awake_sendto(xsk);
+        ret = 0;
         if (ret) {
             dlog_error2("awake_sendto", ret);
             return ECOMM;
@@ -394,14 +417,14 @@ always_inline int complete_tx(xsk_info* xsk, struct xsk_ring_cons* cq)
     return 0;
 }
 
-always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
+int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
 {
     u32 idx;
     int ret;
 
     struct xsk_ring_cons* cq = umem->nbfqs == 1 ? &umem->cq0 : xsk->comp_ring;
     while (xsk_ring_prod__reserve(&xsk->tx, xsk->batch_size, &idx) < xsk->batch_size) {
-        ret = complete_tx(xsk, cq);
+        ret = complete_tx(xsk, cq, 0);
         if (ret)
             return ret;
 
@@ -423,7 +446,7 @@ always_inline int xdp_txonly(xsk_info* xsk, umem_info* umem, u32* umem_cursor)
     *umem_cursor += xsk->batch_size;
     *umem_cursor %= UMEM_LEN;
 
-    ret = complete_tx(xsk, cq);
+    ret = complete_tx(xsk, cq, 1);
     if (ret)
         return ret;
 
@@ -551,8 +574,6 @@ struct benchmark_ctx {
     u8 dmac[6];
 };
 
-#define POLL_TIMEOUT 1000
-
 void* bench_rx(void* rxctx_ptr)
 {
     struct benchmark_ctx* ctx = (struct benchmark_ctx*)rxctx_ptr;
@@ -616,6 +637,13 @@ void* bench_tx(void* txctxptr)
     u32 umem_cursor = 0;
     u64 t0, t1;
 
+
+    pthread_t pollers[ctx->nbxsks_per_thread];
+    //if (xsks[0].busy_poll) {
+        for (u32 i = 0; i < ctx->nbxsks_per_thread; ++i) {
+            pthread_create(&pollers[i], NULL, drive_send_path, (void*)&xsks[i]);
+        }
+    //}
     switch (ctx->pollmode) {
     case DQDK_RCV_POLL:
         struct pollfd* fds = (struct pollfd*)calloc(ctx->nbxsks_per_thread, sizeof(struct pollfd));
@@ -663,6 +691,12 @@ void* bench_tx(void* txctxptr)
             dlog_error2("getsockopt(XDP_STATISTICS)", ret);
         }
     }
+
+    //if (xsks[0].busy_poll) {
+        for (u32 i = 0; i < ctx->nbxsks_per_thread; ++i) {
+            pthread_join(pollers[i], NULL);
+        }
+    //}
 
     return NULL;
 }
@@ -765,6 +799,7 @@ void stats_dump(struct xsk_stat* stats)
            "    XSK TX Successful Fills:  %llu\n"
            "    XSK RXQ Empty:            %llu\n"
            "    XSK TXQ Need Wakeup:      %llu\n"
+           "    XSK TXQ Need Wakeup 2:      %llu\n"
            "    X-XSK RX Dropped:         %llu\n"
            "    X-XSK RX FillQ Empty:     %llu\n"
            "    X-XSK RX Invalid Descs:   %llu\n"
@@ -780,7 +815,7 @@ void stats_dump(struct xsk_stat* stats)
         stats->fail_polls, stats->timeout_polls,
         stats->rx_fill_fail_polls, stats->rx_successful_fills,
         stats->tx_successful_fills, stats->rx_empty_polls, stats->tx_wakeup_sendtos,
-
+        stats->tx_wakeup_sendtos_2,
         stats->xstats.rx_dropped, stats->xstats.rx_fill_ring_empty_descs,
         stats->xstats.rx_invalid_descs, stats->xstats.rx_ring_full,
         stats->xstats.tx_invalid_descs, stats->xstats.tx_ring_empty_descs);
@@ -879,6 +914,8 @@ u32 dqdk_calc_affinity(int irq, int ht, int samecore, unsigned long* cpumask)
 
 int dqdk_set_affinity(int ht, int samecore, int irq, unsigned long* cpumask, cpu_set_t* cpuset, pthread_attr_t* attrs)
 {
+    return 0;
+    //return 0;
     u32 affinity = dqdk_calc_affinity(irq, ht, samecore, cpumask);
     int ret = 0;
 
@@ -1362,7 +1399,7 @@ int main(int argc, char** argv)
         xsks[i].libbpf_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD;
         xsks[i].bind_flags = (opt_zcopy ? XDP_ZEROCOPY : XDP_COPY)
             | (opt_needs_wakeup ? XDP_USE_NEED_WAKEUP : 0);
-
+        printf("bind flags %d for socket %d\n", xsks[i].bind_flags, i);
         if (i != 0 && opt_shared_umem > 1) {
             xsks[i].bind_flags = XDP_SHARED_UMEM;
         }
@@ -1498,6 +1535,7 @@ int main(int argc, char** argv)
         avg_stats.rx_fill_fail_polls += xsks[i].stats.rx_fill_fail_polls;
         avg_stats.timeout_polls += xsks[i].stats.timeout_polls;
         avg_stats.tx_wakeup_sendtos += xsks[i].stats.tx_wakeup_sendtos;
+        avg_stats.tx_wakeup_sendtos_2 += xsks[i].stats.tx_wakeup_sendtos_2;
         avg_stats.rx_successful_fills += xsks[i].stats.rx_successful_fills;
         avg_stats.tx_successful_fills += xsks[i].stats.tx_successful_fills;
 
